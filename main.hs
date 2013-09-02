@@ -12,7 +12,7 @@ import qualified Data.Map as M
 import qualified Data.Vector as V
 import Control.Monad.Operational.Mini
 
-gravity = 0.15
+gravity = 0.2
 
 loadBitmaps "images"
 
@@ -20,12 +20,25 @@ tileCoord :: Iso' (V2 Float) (V2 Int)
 tileCoord = mapping $ iso (floor.(/32)) ((*32).fromIntegral)
 
 renderField :: (Picture2D m, Monad m) => Field -> m ()
-renderField _ = translate (V2 16 16) $ forM_ (V2 <$> [0..19] <*> [0..14]) $ \c -> translate (c ^. from tileCoord) $ fromBitmap $ cropBitmap _Outside_A5_png (32, 32) (0, 32*6)
+renderField field = translate (V2 16 16) $ forM_ (V2 <$> [0..19] <*> [0..14]) $ \c -> translate (c ^. from tileCoord) $ do
+    case field ^? chip . ix c of
+        Just False     -> fromBitmap $ cropBitmap _Outside_A5_png (32, 32) (0, 32*6)
+        _ -> return ()
 
 castSkill :: MonadState World m => Int -> StateT Player m ()
 castSkill _ = do
     pos <- use position
-    lift $ effects %= (translate pos effectAttack:)
+    lift $ do
+        effects %= (translate pos effectAttack:)
+        n <- uses enemies IM.size
+        w <- use id
+        w' <- flip execStateT w $ forM_ [0..n-1] $ \i -> unsafeSight (unsafeSingular $ enemies . ix i) $ do
+            p <- use position
+            when (quadrance (p - pos) < 72^2) $ velocity += normalize (p - pos) ^* 4 + V2 0 (-4)
+        id .= w'
+
+canMove :: MonadState World m => V2 Float -> m Bool
+canMove pos = liftM (maybe False id) $ preuse $ field . chip . ix (view tileCoord pos)
 
 runPlayer :: (Applicative m, Picture2D m, Keyboard m, MonadState World m) => StateT Player m ()
 runPlayer = do
@@ -34,18 +47,14 @@ runPlayer = do
         0 -> return ()
         a -> castSkill a >> playerCharge .= 0
     whenM (keyChar 'Z') $ playerCharge += 1
-    whenM (pure isLanding <&&> keySpecial KeyUp) $ playerVelocity += V2 0 (-4)
-    whenM (keySpecial KeyLeft) $ position -= V2 2 0 >> direction .= 1
-    whenM (keySpecial KeyRight) $ position += V2 2 0 >> direction .= 2
-    whenM (keySpecial KeyLeft <||> keySpecial KeyRight) $ modify updateAnimation
-
-type Strategy = Program Tactic
-
-data Tactic x where
-    Approach :: Tactic ()
-    Wait :: Tactic ()
-
-defaultStrategy = singleton Approach
+    when isLanding $ do
+        whenM (keySpecial KeyUp) $ playerVelocity += V2 0 (-4)
+    whenM (keySpecial KeyLeft) $ velocity . _x %= max (-4) . subtract 0.2 >> direction .= 1
+    whenM (keySpecial KeyRight) $ velocity . _x %= min 4 . (+0.2) >> direction .= 2
+    b <- keySpecial KeyLeft <||> keySpecial KeyRight
+    if b
+        then modify updateAnimation
+        else when isLanding $ velocity . _x .= 0
 
 effectAttack :: Free GUI ()
 effectAttack = do
@@ -68,57 +77,81 @@ effectAttack = do
 friction :: MonadState World m => V2 Float -> m Float
 friction _ = return 0
 
-runEnemy :: forall m. (MonadState World m, Applicative m, Picture2D m)  => Strategy () -> StateT Enemy m ()
-runEnemy m = do
-    common (cropBitmap _Monster1_png (96, 128) (192, 0))
+loadMap :: FilePath -> IO Field
+loadMap path = do
+    xss <- map words <$> lines <$> readFile path
+    return $ Field $ M.fromList [(V2 c r, x /= "*") | (r, xs) <- zip [0..] xss, (c, x) <- zip [0..] xs]
+ 
+runEnemy :: forall m. (MonadState World m, Applicative m, Picture2D m) => StateT Enemy m ()
+runEnemy = do
+    isLanding <- common $ cropBitmap _Monster1_png (96, 128) (192, 0)
     whenM (uses (velocity . _x) (<0)) $ direction .= 1
     whenM (uses (velocity . _x) (>0)) $ direction .= 2
-    interpret exec m
+    m <- use enemyStrategy
+    when isLanding $ enemyStrategy <~ exec m
     modify updateAnimation
     return ()
     where
-        exec :: Tactic x -> StateT Enemy m x
-        exec Approach = do
+        exec :: Strategy Void -> StateT Enemy m (Strategy Void)
+        exec (Approach :>>= cont) = do
             target <- lift $ use $ thePlayer . position
             pos <- use position
 
-            velocity += (normalize (target - pos) & _y .~ 0) ^* 0.1
+            velocity . _x .= signum (view _x target - view _x pos)
+            return (cont ())
 
-        exec Wait = return ()
-        exec Flee = do
+        exec (Wait :>>= cont) = do
+            velocity . _x .= 0
+            return (cont ())
+        exec (Flee :>>= cont) = do
             target <- lift $ use $ thePlayer . position
             pos <- use position
 
-            velocity -= (normalize (target - pos) & _y .~ 0) ^* 0.1
+            velocity .= (normalize (target - pos) & _y .~ 0) ^* 2
+            return (cont ())
 
 common :: (HasAnimationComponent t, HasPosition t, HasVelocity t
     , Applicative m, Picture2D m, MonadState World m) => Bitmap -> StateT t m Bool
 common base = do
-    modify updatePosition
-    isLanding <- uses (position._y) (>=440)
+    pos <- (+) <$> use position <*> use velocity
+    pos' <- use position
+    b <- lift $ canMove pos
+    let avoidSink = whenM (use position >>= \p -> lift (notF (canMove (p + V2 0 15)) <&&> canMove (p - V2 0 32)))
+            $ position -= V2 0 1 >> avoidSink
+    if b
+        then position .= pos
+        else do
+            velocity .= zero
+    () <- avoidSink
+    isLanding <- notM $ lift $ canMove (pos' + V2 0 16)
     if isLanding
-        then velocity . _y .= 0 >> position . _y .= 440
+        then velocity . _y .= 0
         else velocity += V2 0 gravity
-    bmp <- character base <$> uses animation (`div`(animationPeriod`div`4)) <*> use direction
+    bmp <- characterBitmap base <$> uses animation (`div`(animationPeriod`div`4)) <*> use direction
     use position >>= flip translate (fromBitmap bmp)
     return isLanding
 
-character b 0 r = cropBitmap b (32, 32) (0, r * 32)
-character b 1 r = cropBitmap b (32, 32) (32, r * 32)
-character b 2 r = cropBitmap b (32, 32) (64, r * 32)
-character b 3 r = cropBitmap b (32, 32) (32, r * 32)
+
+
+characterBitmap b 0 r = cropBitmap b (32, 32) (0, r * 32)
+characterBitmap b 1 r = cropBitmap b (32, 32) (32, r * 32)
+characterBitmap b 2 r = cropBitmap b (32, 32) (64, r * 32)
+characterBitmap b 3 r = cropBitmap b (32, 32) (32, r * 32)
 
 unsafeSight :: Monad m => Lens' s t -> StateT t (StateT s m) a -> StateT s m a
 unsafeSight l m = StateT $ \s -> do
     ((a, t'), s') <- m `runStateT` view l s `runStateT` s
     return (a, set l t' s')
 
-main = runGame def $ flip evalStateT World { _thePlayer = newPlayer, _enemies = IM.singleton 0 newEnemy
-    , _effects = [wire $ V.fromList $ map ((,) zero) [V2 40 40, V2 140 140, V2 180 120, V2 240 100, V2 280 80, V2 300 40]] } $ foreverTick $ do
-    use field >>= renderField
-    unsafeSight thePlayer runPlayer
-    n <- uses enemies IM.size
-    forM_ [0..n-1] $ \i -> do
-        unsafeSight (unsafeSingular $ enemies . ix i) $ runEnemy defaultStrategy 
-    es <- use effects
-    effects <~ fmap (concatMap $ either return (const [])) (mapM untick es)
+main = do
+    f <- loadMap "map.map"
+    runGame def $ flip evalStateT World { _thePlayer = newPlayer & position .~ V2 80 240, _enemies = IM.singleton 0 newEnemy
+        , _effects = [], _field = f } $ foreverTick $ do
+        translate (V2 320 240) $ scale 1.5 $ fromBitmap _Mountains4_png
+        use field >>= renderField
+        unsafeSight thePlayer runPlayer
+        n <- uses enemies IM.size
+        forM_ [0..n-1] $ \i -> do
+            unsafeSight (unsafeSingular $ enemies . ix i) runEnemy
+        es <- use effects
+        effects <~ fmap (concatMap $ either return (const [])) (mapM untick es)

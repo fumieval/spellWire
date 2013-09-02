@@ -1,13 +1,27 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell, GADTs #-}
 module Types where
 
 import Graphics.UI.FreeGame
 import Control.Lens
 import Control.Monad.Free
-import Data.Map as Map
+import qualified Data.Map as Map
 import Data.Void
-import Data.IntMap as IM
+import qualified Data.IntMap as IM
 import qualified Data.Vector as V
+import Control.Monad.Operational.Mini
+
+type Strategy = ReifiedProgram Tactic
+
+data Tactic x where
+    Approach :: Tactic ()
+    Wait :: Tactic ()
+    Flee :: Tactic ()
+    Attack :: Tactic ()
+
+defaultStrategy :: Strategy ()
+defaultStrategy = do
+	replicateM_ 30 $ singleton Approach
+	replicateM_ 30 $ singleton Wait
 
 class HasPosition t where
     position :: Lens' t (V2 Float)
@@ -33,6 +47,7 @@ data Enemy = Enemy
     , _enemyVelocity :: V2 Float
     , _enemyDirection :: Int
     , _enemyAnimation :: Int
+    , _enemyStrategy :: Strategy Void
     }
 makeLenses ''Enemy
 
@@ -50,11 +65,15 @@ newEnemy = Enemy
     , _enemyVelocity = V2 0 0
     , _enemyDirection = 0
     , _enemyAnimation = 0
+    , _enemyStrategy = forever $ do
+		replicateM_ 30 $ singleton Approach
+		replicateM_ 30 $ singleton Wait
     }
 
 data Field = Field
     { _chip :: Map.Map (V2 Int) Bool
     }
+makeLenses ''Field
 
 data World = World
     { _thePlayer :: Player
