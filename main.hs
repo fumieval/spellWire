@@ -20,10 +20,12 @@ tileCoord :: Iso' (V2 Float) (V2 Int)
 tileCoord = mapping $ iso (floor.(/32)) ((*32).fromIntegral)
 
 renderField :: (Picture2D m, Monad m) => Field -> m ()
-renderField field = translate (V2 16 16) $ forM_ (V2 <$> [0..19] <*> [0..14]) $ \c -> translate (c ^. from tileCoord) $ do
-    case field ^? chip . ix c of
-        Just False     -> fromBitmap $ cropBitmap _Outside_A5_png (32, 32) (0, 32*6)
+renderField field = translate (V2 16 16) $ forM_ (V2 <$> [c..c+20] <*> [r..r+15]) $ \t -> translate (t ^. from tileCoord) $ do
+    case field ^? chip . ix t of
+        Just False -> fromBitmap $ cropBitmap _Outside_A5_png (32, 32) (0, 32*6)
         _ -> return ()
+        where
+            V2 c r = field ^. viewPosition . tileCoord
 
 castSkill :: MonadState World m => Int -> StateT Player m ()
 castSkill _ = do
@@ -34,7 +36,7 @@ castSkill _ = do
         w <- use id
         w' <- flip execStateT w $ forM_ [0..n-1] $ \i -> unsafeSight (unsafeSingular $ enemies . ix i) $ do
             p <- use position
-            when (quadrance (p - pos) < 72^2) $ velocity += normalize (p - pos) ^* 4 + V2 0 (-4)
+            when (quadrance (p - pos) < 72^2) $ velocity += normalize (p - pos) ^* 8 + V2 0 (-4)
         id .= w'
 
 canMove :: MonadState World m => V2 Float -> m Bool
@@ -48,7 +50,7 @@ runPlayer = do
         a -> castSkill a >> playerCharge .= 0
     whenM (keyChar 'Z') $ playerCharge += 1
     when isLanding $ do
-        whenM (keySpecial KeyUp) $ playerVelocity += V2 0 (-4)
+        whenM (keySpecial KeyUp) $ playerVelocity += V2 0 (-5)
     whenM (keySpecial KeyLeft) $ velocity . _x %= max (-4) . subtract 0.2 >> direction .= 1
     whenM (keySpecial KeyRight) $ velocity . _x %= min 4 . (+0.2) >> direction .= 2
     b <- keySpecial KeyLeft <||> keySpecial KeyRight
@@ -80,8 +82,8 @@ friction _ = return 0
 loadMap :: FilePath -> IO Field
 loadMap path = do
     xss <- map words <$> lines <$> readFile path
-    return $ Field $ M.fromList [(V2 c r, x /= "*") | (r, xs) <- zip [0..] xss, (c, x) <- zip [0..] xs]
- 
+    return $ Field (M.fromList [(V2 c r, x /= "*") | (r, xs) <- zip [0..] xss, (c, x) <- zip [0..] xs]) (V2 0 0)
+
 runEnemy :: forall m. (MonadState World m, Applicative m, Picture2D m) => StateT Enemy m ()
 runEnemy = do
     isLanding <- common $ cropBitmap _Monster1_png (96, 128) (192, 0)
@@ -131,8 +133,6 @@ common base = do
     use position >>= flip translate (fromBitmap bmp)
     return isLanding
 
-
-
 characterBitmap b 0 r = cropBitmap b (32, 32) (0, r * 32)
 characterBitmap b 1 r = cropBitmap b (32, 32) (32, r * 32)
 characterBitmap b 2 r = cropBitmap b (32, 32) (64, r * 32)
@@ -141,17 +141,28 @@ characterBitmap b 3 r = cropBitmap b (32, 32) (32, r * 32)
 unsafeSight :: Monad m => Lens' s t -> StateT t (StateT s m) a -> StateT s m a
 unsafeSight l m = StateT $ \s -> do
     ((a, t'), s') <- m `runStateT` view l s `runStateT` s
-    return (a, set l t' s')
+    return (a, set l t' s') 
+
+scroll :: (Keyboard m, MonadState World m) => m ()
+scroll = do
+    whenM (keyChar 'A') $ field . viewPosition -= V2 2 0
+    whenM (keyChar 'S') $ field . viewPosition += V2 2 0
 
 main = do
     f <- loadMap "map.map"
     runGame def $ flip evalStateT World { _thePlayer = newPlayer & position .~ V2 80 240, _enemies = IM.singleton 0 newEnemy
         , _effects = [], _field = f } $ foreverTick $ do
         translate (V2 320 240) $ scale 1.5 $ fromBitmap _Mountains4_png
-        use field >>= renderField
-        unsafeSight thePlayer runPlayer
-        n <- uses enemies IM.size
-        forM_ [0..n-1] $ \i -> do
-            unsafeSight (unsafeSingular $ enemies . ix i) runEnemy
-        es <- use effects
-        effects <~ fmap (concatMap $ either return (const [])) (mapM untick es)
+        
+        scroll
+
+        offset <- use $ field . viewPosition
+        translate (negate offset) $ do
+            use field >>= renderField
+            unsafeSight thePlayer runPlayer
+            n <- uses enemies IM.size
+            forM_ [0..n-1] $ \i -> do
+                unsafeSight (unsafeSingular $ enemies . ix i) runEnemy
+            
+            es <- use effects
+            effects <~ fmap (concatMap $ either return (const [])) (mapM untick es)

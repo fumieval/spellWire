@@ -17,11 +17,17 @@ data Tactic x where
     Wait :: Tactic ()
     Flee :: Tactic ()
     Attack :: Tactic ()
+    GetDistance :: Tactic Float
 
 defaultStrategy :: Strategy ()
 defaultStrategy = do
-	replicateM_ 30 $ singleton Approach
-	replicateM_ 30 $ singleton Wait
+    d <- singleton GetDistance
+    if d < 60
+        then do
+        	replicateM_ 30 $ singleton Approach
+        	replicateM_ 30 $ singleton Wait
+        else 
+            singleton Wait
 
 class HasPosition t where
     position :: Lens' t (V2 Float)
@@ -72,6 +78,7 @@ newEnemy = Enemy
 
 data Field = Field
     { _chip :: Map.Map (V2 Int) Bool
+    , _viewPosition :: V2 Float
     }
 makeLenses ''Field
 
@@ -80,8 +87,6 @@ data World = World
     , _enemies :: IM.IntMap Enemy
     , _field :: Field
     , _effects :: [Free GUI ()]
-    , _viewCoord :: V2 Float
-    , _theWire :: V.Vector (V2 Float, V2 Float)
     }
 makeLenses ''World
 
