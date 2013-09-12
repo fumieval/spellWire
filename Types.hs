@@ -22,7 +22,7 @@ data Tactic x where
 defaultStrategy :: Strategy ()
 defaultStrategy = do
     d <- singleton GetDistance
-    if d < 60
+    if d < 160
         then do
         	replicateM_ 30 $ singleton Approach
         	replicateM_ 30 $ singleton Wait
@@ -48,11 +48,14 @@ data Player = Player
     }
 makeLenses ''Player
 
+data EnemyCharacter = Squirt | Fly
+
 data Enemy = Enemy
     { _enemyCoord :: V2 Float
     , _enemyVelocity :: V2 Float
     , _enemyDirection :: Int
     , _enemyAnimation :: Int
+    , _enemyCharacter :: EnemyCharacter
     , _enemyStrategy :: Strategy Void
     }
 makeLenses ''Enemy
@@ -71,9 +74,8 @@ newEnemy = Enemy
     , _enemyVelocity = V2 0 0
     , _enemyDirection = 0
     , _enemyAnimation = 0
-    , _enemyStrategy = forever $ do
-		replicateM_ 30 $ singleton Approach
-		replicateM_ 30 $ singleton Wait
+    , _enemyCharacter = Squirt
+    , _enemyStrategy = forever defaultStrategy
     }
 
 data Field = Field

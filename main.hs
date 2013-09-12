@@ -1,16 +1,19 @@
 {-# LANGUAGE LambdaCase, TemplateHaskell, GADTs, FlexibleContexts, Rank2Types, ScopedTypeVariables, MultiWayIf #-}
 import Control.Lens
 import Control.Bool
-import Graphics.UI.FreeGame
 import Control.Monad.State
-import Wire
-import Types
-import Data.Void
+import Control.Monad.Writer
+import Control.Monad.Operational.Mini
 import Control.Monad.Free
 import qualified Data.IntMap as IM
 import qualified Data.Map as M
 import qualified Data.Vector as V
-import Control.Monad.Operational.Mini
+import Data.Void
+import Data.Monoid
+import Graphics.UI.FreeGame
+
+import Wire
+import Types
 
 gravity = 0.2
 
@@ -53,10 +56,9 @@ runPlayer = do
         whenM (keySpecial KeyUp) $ playerVelocity += V2 0 (-5)
     whenM (keySpecial KeyLeft) $ velocity . _x %= max (-4) . subtract 0.2 >> direction .= 1
     whenM (keySpecial KeyRight) $ velocity . _x %= min 4 . (+0.2) >> direction .= 2
-    b <- keySpecial KeyLeft <||> keySpecial KeyRight
-    if b
-        then modify updateAnimation
-        else when isLanding $ velocity . _x .= 0
+    ifThenElseM (keySpecial KeyLeft <||> keySpecial KeyRight)
+        (modify updateAnimation)
+        (when isLanding $ velocity . _x .= 0)
 
 effectAttack :: Free GUI ()
 effectAttack = do
@@ -79,53 +81,63 @@ effectAttack = do
 friction :: MonadState World m => V2 Float -> m Float
 friction _ = return 0
 
-loadMap :: FilePath -> IO Field
+loadMap :: FilePath -> IO (Field, [Enemy])
 loadMap path = do
-    xss <- map words <$> lines <$> readFile path
-    return $ Field (M.fromList [(V2 c r, x /= "*") | (r, xs) <- zip [0..] xss, (c, x) <- zip [0..] xs]) (V2 0 0)
+    let push x = tell (Endo (x:))
+    rows <- map words <$> lines <$> readFile path
+    let (cs, Endo f) = runWriter $ liftM concat $ forM (zip [0..] rows)
+            $ \(r, row) -> forM (zip [0..] row)
+            $ \(c, ch) -> let crd = V2 c r in liftM ((,) crd) $ case ch of
+                "*" -> return False
+                "-" -> return True
+                "0" -> push (newEnemy & position . tileCoord .~ crd) >> return True
+                "1" -> push (newEnemy & position . tileCoord .~ crd & enemyCharacter .~ Fly) >> return True
+    return (Field (M.fromList cs) (V2 0 0), f [])
 
 runEnemy :: forall m. (MonadState World m, Applicative m, Picture2D m) => StateT Enemy m ()
 runEnemy = do
-    isLanding <- common $ cropBitmap _Monster1_png (96, 128) (192, 0)
+    cha <- use enemyCharacter
+    isLanding <- common $ case cha of
+        Squirt -> cropBitmap _Monster1_png (96, 128) (192, 0)
+        Fly -> cropBitmap _Monster1_png (96, 128) (288, 0)
     whenM (uses (velocity . _x) (<0)) $ direction .= 1
     whenM (uses (velocity . _x) (>0)) $ direction .= 2
     m <- use enemyStrategy
-    when isLanding $ enemyStrategy <~ exec m
+    when isLanding $ enemyStrategy <~ exec cha m
     modify updateAnimation
     return ()
     where
-        exec :: Strategy Void -> StateT Enemy m (Strategy Void)
-        exec (Approach :>>= cont) = do
+        exec :: EnemyCharacter -> Strategy Void -> StateT Enemy m (Strategy Void)
+        exec cha (Approach :>>= cont) = do
             target <- lift $ use $ thePlayer . position
             pos <- use position
 
-            velocity . _x .= signum (view _x target - view _x pos)
+            case cha of
+                Squirt -> velocity . _x .= signum (view _x target - view _x pos)
+                Fly -> velocity .= normalize (target - pos) * V2 3 6
             return (cont ())
 
-        exec (Wait :>>= cont) = do
+        exec _ (Wait :>>= cont) = do
             velocity . _x .= 0
             return (cont ())
-        exec (Flee :>>= cont) = do
+        exec _ (GetDistance :>>= cont) = do
             target <- lift $ use $ thePlayer . position
             pos <- use position
-
-            velocity .= (normalize (target - pos) & _y .~ 0) ^* 2
-            return (cont ())
+            return (cont (distance target pos))            
 
 common :: (HasAnimationComponent t, HasPosition t, HasVelocity t
     , Applicative m, Picture2D m, MonadState World m) => Bitmap -> StateT t m Bool
 common base = do
-    pos <- (+) <$> use position <*> use velocity
-    pos' <- use position
-    b <- lift $ canMove pos
+    vel <- use velocity
+    pos <- use position
     let avoidSink = whenM (use position >>= \p -> lift (notF (canMove (p + V2 0 15)) <&&> canMove (p - V2 0 32)))
             $ position -= V2 0 1 >> avoidSink
-    if b
-        then position .= pos
-        else do
-            velocity .= zero
+    tx <- ifThenElseM (lift $ canMove (pos + vel * V2 1 0)) (return $ vel ^. _x) (velocity . _x *= (-0.5) >> return 0)
+    ty <- ifThenElseM (lift $ canMove (pos + vel * V2 0 1)) (return $ vel ^. _y) (velocity . _y *= (-0.5) >> return 0)
+
+    position += V2 tx ty
     () <- avoidSink
-    isLanding <- notM $ lift $ canMove (pos' + V2 0 16)
+    isLanding <- notM $ lift $ canMove (pos + V2 0 16 + V2 tx ty)
     if isLanding
         then velocity . _y .= 0
         else velocity += V2 0 gravity
@@ -149,8 +161,9 @@ scroll = do
     whenM (keyChar 'S') $ field . viewPosition += V2 2 0
 
 main = do
-    f <- loadMap "map.map"
-    runGame def $ flip evalStateT World { _thePlayer = newPlayer & position .~ V2 80 240, _enemies = IM.singleton 0 newEnemy
+    (f, es) <- loadMap "map.map"
+    runGame def $ flip evalStateT World { _thePlayer = newPlayer & position .~ V2 80 240
+        , _enemies = IM.fromList (zip [0..] es)
         , _effects = [], _field = f } $ foreverTick $ do
         translate (V2 320 240) $ scale 1.5 $ fromBitmap _Mountains4_png
         
