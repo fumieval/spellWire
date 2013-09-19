@@ -17,17 +17,17 @@ data Tactic x where
     Wait :: Tactic ()
     Flee :: Tactic ()
     Attack :: Tactic ()
-    GetDistance :: Tactic Float
+    RelativePlayer :: Tactic (Maybe (V2 Float))
 
 defaultStrategy :: Strategy ()
 defaultStrategy = do
-    d <- singleton GetDistance
-    if d < 160
-        then do
-        	replicateM_ 30 $ singleton Approach
-        	replicateM_ 30 $ singleton Wait
-        else 
-            singleton Wait
+    r <- singleton RelativePlayer
+    case r of
+        Just d
+            | quadrance d < 160 ^ 2 -> do
+                replicateM_ 29 $ singleton Approach
+                replicateM_ 33 $ singleton Wait
+        _ -> singleton Wait
 
 class HasPosition t where
     position :: Lens' t (V2 Float)
@@ -39,12 +39,28 @@ class HasAnimationComponent t where
     direction :: Lens' t Int
     animation :: Lens' t Int
 
+data Shot = Shot
+    { _shotPosition :: V2 Float
+    , _shotVelocity :: V2 Float
+    , _shotRotation :: Float
+    }
+makeLenses ''Shot
+
+instance HasVelocity Shot where
+    velocity = shotVelocity
+
+instance HasPosition Shot where
+    position = shotPosition
+
 data Player = Player
     { _playerCoord :: V2 Float
+    , _playerHP :: Int
     , _playerVelocity :: V2 Float
     , _playerDirection :: Int
     , _playerAnimation :: Int
     , _playerCharge :: Int
+    , _playerShots :: [Shot]
+    , _playerInvincible :: Int
     }
 makeLenses ''Player
 
@@ -53,6 +69,7 @@ data EnemyCharacter = Squirt | Fly
 data Enemy = Enemy
     { _enemyCoord :: V2 Float
     , _enemyVelocity :: V2 Float
+    , _enemyHP :: Int
     , _enemyDirection :: Int
     , _enemyAnimation :: Int
     , _enemyCharacter :: EnemyCharacter
@@ -66,6 +83,8 @@ newPlayer = Player
     , _playerDirection = 0
     , _playerAnimation = 0
     , _playerCharge = 0
+    , _playerShots = []
+    , _playerInvincible = 0
     }
 
 newEnemy :: Enemy
@@ -74,6 +93,7 @@ newEnemy = Enemy
     , _enemyVelocity = V2 0 0
     , _enemyDirection = 0
     , _enemyAnimation = 0
+    , _enemyHP = 10
     , _enemyCharacter = Squirt
     , _enemyStrategy = forever defaultStrategy
     }
