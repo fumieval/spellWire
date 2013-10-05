@@ -87,7 +87,7 @@ runPlayer = do
             Just (rs, l) -> whenM (notM $ lift $ canMove $ view position l) $ playerShots .= rs
     holdShift <~ keySpecial KeyLeftShift
 
-    isLanding <- common $ cropBitmap _Actor_png (96, 128) (0, 0)
+    isLanding <- common $ characterBitmap 32 32 $ cropBitmap _Actor_png (96, 128) (0, 0)
 
     vel <- use velocity
     ppos <- use position
@@ -137,15 +137,8 @@ runPlayer = do
 
 effectAttack :: Free GUI ()
 effectAttack = do
-    let go c = fromBitmap (cropBitmap _Attack5_png (192, 192) c) >> tick
-
-    go (192 * 0, 0)
-    go (192 * 1, 0)
-    go (192 * 2, 0)
-    go (192 * 3, 0)
-    go (192 * 4, 0)
-    go (192 * 0, 192)
-    go (192 * 1, 192)
+    let go c = fromBitmap (cropBitmap _Hit_png (100, 100) c) >> tick
+    mapM_ go $ (,) <$> [0,100..700] <*> [0,100]
 
 loadMap :: FilePath -> IO (Field, [Enemy])
 loadMap path = do
@@ -189,8 +182,8 @@ runEnemy e = runMaybeT $ flip execStateT e $ do
     uses enemyHP (>0) >>= guard
     cha <- use enemyCharacter
     isLanding <- common $ case cha of
-        Squirt -> cropBitmap _Monster1_png (96, 128) (192, 0)
-        Fly -> cropBitmap _Monster1_png (96, 128) (288, 0)
+        Squirt -> characterBitmap 32 48 $ cropBitmap _vx_chara08_a_png (96, 192) (192, 192)
+        Fly -> characterBitmap 32 48 $ cropBitmap _vx_chara08_a_png (96, 192) (288, 192)
     whenM (uses (velocity . _x) (<0)) $ direction .= 1
     whenM (uses (velocity . _x) (>0)) $ direction .= 2
     m <- use enemyStrategy
@@ -228,7 +221,7 @@ runEnemy e = runMaybeT $ flip execStateT e $ do
         exec _ (Put s :>>= cont) = cont <$> put s
 
 common :: (HasAnimationComponent t, HasPosition t, HasVelocity t, HasInvincibleDuration t
-    , Applicative m, Picture2D m, MonadState World m, HasHP t) => Bitmap -> StateT t m Bool
+    , Applicative m, Picture2D m, MonadState World m, HasHP t) => (Int -> Int -> Bitmap) -> StateT t m Bool
 common base = do
     vel <- use velocity
     pos <- use position
@@ -247,7 +240,7 @@ common base = do
     if isLanding
         then velocity . _y .= 0
         else velocity += V2 0 gravity >> velocity *= 0.99
-    bmp <- characterBitmap base <$> uses animation (`div`(animationPeriod`div`4)) <*> use direction
+    bmp <- base <$> uses animation (`div`(animationPeriod`div`4)) <*> use direction
     tr <- ifThenElseM (uses invincibleDuration (>0)) 
         (invincibleDuration -= 1 >> return (colored (Color 1 1 1 0.5)))
         (return id)
@@ -255,10 +248,10 @@ common base = do
 
     return isLanding
 
-characterBitmap b 0 r = cropBitmap b (32, 32) (0, r * 32)
-characterBitmap b 1 r = cropBitmap b (32, 32) (32, r * 32)
-characterBitmap b 2 r = cropBitmap b (32, 32) (64, r * 32)
-characterBitmap b 3 r = cropBitmap b (32, 32) (32, r * 32)
+characterBitmap w h b 0 r = cropBitmap b (w, h) (0, r * h)
+characterBitmap w h b 1 r = cropBitmap b (w, h) (w * 1, r * h)
+characterBitmap w h b 2 r = cropBitmap b (w, h) (w * 2, r * h)
+characterBitmap w h b 3 r = cropBitmap b (w, h) (w * 3, r * h)
 
 unsafeSight :: Monad m => Lens' s t -> StateT t (StateT s m) a -> StateT s m a
 unsafeSight l m = StateT $ \s -> do
@@ -277,11 +270,13 @@ scroll = do
 
 main = do
     (f, es) <- loadMap "map.map"
-    runGame def $ flip evalStateT World { _thePlayer = newPlayer & position .~ V2 80 240
+    runGame def $ flip evalStateT World
+        { _thePlayer = newPlayer & position .~ V2 80 240
         , _enemies = IM.fromList (zip [0..] es)
-        , _effects = [], _field = f } $ loop >> foreverTick ( translate (V2 320 240) $ scale 1.5 $ fromBitmap _Mountains4_png >> translate (V2 320 240) (fromBitmap _gameover_png)) where
-    loop = do
-        translate (V2 320 240) $ scale 1.5 $ fromBitmap _Mountains4_png
+        , _effects = []
+        , _field = f
+        } $ foreverTick $ do
+        translate (V2 320 240) $ fromBitmap _background_png
         
         ppos <- use $ thePlayer . position
 
@@ -300,7 +295,6 @@ main = do
         whenM (isGoal ppos) $ translate (V2 320 240) $ fromBitmap _clear_png
 
         hp <- use $ thePlayer . playerHP
-        when (hp > 0) $ do
-            forM_ [0..hp-1] $ \i -> translate (V2 (fromIntegral i * 32 + 40) 40) $ fromBitmap _heart_png
-            tick
-            loop
+        unless (hp > 0) quit
+
+        forM_ [0..hp-1] $ \i -> translate (V2 (fromIntegral i * 32 + 40) 40) $ fromBitmap _heart_png

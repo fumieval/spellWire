@@ -1,0 +1,11 @@
+vx_chara08_a.png
+
+This picture is authored by REFMAP(http://www.tekepon.net/fsm).
+It must not be used for any purpose than this application.
+
+Actor.png
+
+http://usui.moo.jp/frame2.html
+
+Redistribution of this file is prohibited.
+If not so, you're making the author cry.
